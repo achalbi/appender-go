@@ -30,12 +30,13 @@ func init() {
 	// Read environment variables
 	podName = os.Getenv("POD_NAME")
 	if podName == "" {
-		podName = "default-instance"
+		podName = "default-go-instance"
 	}
 
 	targetURL = os.Getenv("TARGET_URL")
 	if targetURL == "" {
-		// Set a default or make it required, depending on your needs.
+		logrus.Warn("TARGET_URL environment variable not set. Defaulting to http://localhost:8081/append")
+		targetURL = "http://appender-03.appender.svc.cluster.local/append"// Set a default or make it required, depending on your needs.
 		// For this example, we'll log a warning and proceed without a target URL.
 		logrus.Warn("TARGET_URL environment variable not set. The service will not forward requests.")
 	}
@@ -44,16 +45,13 @@ func init() {
 func main() {
 	router := gin.Default()
 
-	// Redirect root to sender.html
+	// Serve sender.html at the root path
 	router.GET("/", func(c *gin.Context) {
-		c.Redirect(http.StatusMovedPermanently, "/sender.html")
+		c.File("sender.html")
 	})
 
 	router.GET("/health", healthHandler)
 	router.POST("/append", appendHandler)
-
-	// Serve static files from the current directory
-	router.Static("/", ".")
 
 	srv := &http.Server{
 		Addr:    listenAddr,
@@ -106,7 +104,7 @@ func appendHandler(c *gin.Context) {
 		return
 	}
 
-	appendedString := fmt.Sprintf("%s I am Java instance %s", req.Input, podName)
+	appendedString := fmt.Sprintf("%s I am GO instance %s", req.Input, podName)
 	logrus.WithField("result", appendedString).Info("Appended string")
 
 	if targetURL != "" {
@@ -138,7 +136,7 @@ func appendHandler(c *gin.Context) {
 			logrus.WithFields(logrus.Fields{"target_url": targetURL, "status_code": resp.StatusCode}).Error("Target URL returned non-OK status code")
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("Target service returned status code %d", resp.StatusCode)})
 			return
-		}
+		} 
 
 	}
 	// If targetURL is not set, still return 200 OK for successful appending
