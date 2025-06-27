@@ -1,129 +1,147 @@
-// Copyright 2023 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-// Outyet is a web server that announces whether or not a particular Go version
-// has been tagged.
 package main
 
 import (
-	"expvar"
-	"flag"
+	"context"
+	"encoding/json"
 	"fmt"
-	"html/template"
-	"log"
 	"net/http"
-	"sync"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
+	"bytes"
+
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 )
 
-// Command-line flags.
 var (
-	httpAddr   = flag.String("addr", "0.0.0.0:8080", "Listen address")
-	pollPeriod = flag.Duration("poll", 5*time.Second, "Poll period")
-	version    = flag.String("version", "1.20", "Go version")
+	podName    string
+	targetURL  string
+	listenAddr = ":8080"
 )
 
-const baseChangeURL = "https://go.googlesource.com/go/+/"
+func init() {
+	// Set up logrus
+	logrus.SetFormatter(&logrus.JSONFormatter{})
+	logrus.SetOutput(os.Stdout)
+	logrus.SetLevel(logrus.InfoLevel)
+
+	// Read environment variables
+	podName = os.Getenv("POD_NAME")
+	if podName == "" {
+		podName = "default-instance"
+	}
+
+	targetURL = os.Getenv("TARGET_URL")
+	if targetURL == "" {
+		// Set a default or make it required, depending on your needs.
+		// For this example, we'll log a warning and proceed without a target URL.
+		logrus.Warn("TARGET_URL environment variable not set. The service will not forward requests.")
+	}
+}
 
 func main() {
-	flag.Parse()
-	changeURL := fmt.Sprintf("%sgo%s", baseChangeURL, *version)
-	http.Handle("/", NewServer(*version, changeURL, *pollPeriod))
-	log.Printf("serving http://%s", *httpAddr)
-	log.Fatal(http.ListenAndServe(*httpAddr, nil))
-}
+	router := gin.Default()
 
-// Exported variables for monitoring the server.
-// These are exported via HTTP as a JSON object at /debug/vars.
-var (
-	hitCount       = expvar.NewInt("hitCount")
-	pollCount      = expvar.NewInt("pollCount")
-	pollError      = expvar.NewString("pollError")
-	pollErrorCount = expvar.NewInt("pollErrorCount")
-)
+	// Redirect root to sender.html
+	router.GET("/", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, "/sender.html")
+	})
 
-// Server implements the outyet server.
-// It serves the user interface (it's an http.Handler)
-// and polls the remote repository for changes.
-type Server struct {
-	version string
-	url     string
-	period  time.Duration
+	router.GET("/health", healthHandler)
+	router.POST("/append", appendHandler)
 
-	mu  sync.RWMutex // protects the yes variable
-	yes bool
-}
+	// Serve static files from the current directory
+	router.Static("/", ".")
 
-// NewServer returns an initialized outyet server.
-func NewServer(version, url string, period time.Duration) *Server {
-	s := &Server{version: version, url: url, period: period}
-	go s.poll()
-	return s
-}
-
-// poll polls the change URL for the specified period until the tag exists.
-// Then it sets the Server's yes field true and exits.
-func (s *Server) poll() {
-	for !isTagged(s.url) {
-		pollSleep(s.period)
+	srv := &http.Server{
+		Addr:    listenAddr,
+		Handler: router,
 	}
-	s.mu.Lock()
-	s.yes = true
-	s.mu.Unlock()
-	pollDone()
+
+	go func() {
+		logrus.Infof("Starting server on %s", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logrus.Fatalf("listen: %s", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shut down the server with
+	// a timeout of 5 seconds.
+	quit := make(chan os.Signal, 1)
+	// kill (no param) default send syscall.SIGTERM
+	// kill -2 is syscall.SIGINT
+	// kill -9 is syscall.SIGKILL but can't be caught, so don't need to add it
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	logrus.Info("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		logrus.Fatal("Server forced to shutdown:", err)
+	}
+
+	logrus.Info("Server exiting")
 }
 
-// Hooks that may be overridden for integration tests.
-var (
-	pollSleep = time.Sleep
-	pollDone  = func() {}
-)
-
-// isTagged makes an HTTP HEAD request to the given URL and reports whether it
-// returned a 200 OK response.
-func isTagged(url string) bool {
-	pollCount.Add(1)
-	r, err := http.Head(url)
-	if err != nil {
-		log.Print(err)
-		pollError.Set(err.Error())
-		pollErrorCount.Add(1)
-		return false
-	}
-	return r.StatusCode == http.StatusOK
+func healthHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "UP"})
 }
 
-// ServeHTTP implements the HTTP user interface.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	hitCount.Add(1)
-	s.mu.RLock()
-	data := struct {
-		URL     string
-		Version string
-		Yes     bool
-	}{
-		s.url,
-		s.version,
-		s.yes,
-	}
-	s.mu.RUnlock()
-	err := tmpl.Execute(w, data)
-	if err != nil {
-		log.Print(err)
-	}
+type AppendRequest struct {
+	Input string `json:"input"`
 }
 
-// tmpl is the HTML template that drives the user interface.
-var tmpl = template.Must(template.New("tmpl").Parse(`
-<!DOCTYPE html><html><body><center>
-	<h2>Is Go {{.Version}} out yet?</h2>
-	<h1>
-	{{if .Yes}}
-		<a href="{{.URL}}">YES!</a>
-	{{else}}
-		No. :-(
-	{{end}}
-	</h1>
-</center></body></html>
-`))
+type AppendResponse struct {
+	Result string `json:"result"`
+}
+
+func appendHandler(c *gin.Context) {
+	var req AppendRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		logrus.WithError(err).Error("Failed to bind JSON")
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	appendedString := fmt.Sprintf("%s I am Java instance %s", req.Input, podName)
+	logrus.WithField("result", appendedString).Info("Appended string")
+
+	if targetURL != "" {
+		// Send the result to the target URL
+		payload := AppendResponse{Result: appendedString}
+		jsonPayload, err := json.Marshal(payload)
+		if err != nil {
+			logrus.WithError(err).Error("Failed to marshal JSON payload for target URL")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process request"})
+			return
+		}
+
+		resp, err := http.Post(targetURL, "application/json", bytes.NewBuffer(jsonPayload))
+		if err != nil {
+			logrus.WithError(err).WithField("target_url", targetURL).Error("Failed to send POST request to target URL")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to forward request to target service"})
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			logrus.WithField("target_url", targetURL).WithField("status_code", resp.StatusCode).Info("Successfully forwarded request to target URL")
+			c.JSON(http.StatusOK, gin.H{"message": "Request processed and forwarded"})
+			return // Return here after successful forwarding
+		} else {
+			// Log and return an error for non-2xx status codes from target
+			// We are returning StatusBadGateway as we failed to get a successful response from the upstream service
+			// You might want to return the exact status code received from the target in some cases, but 502 is a common pattern for upstream errors.
+			logrus.WithFields(logrus.Fields{"target_url": targetURL, "status_code": resp.StatusCode}).Error("Target URL returned non-OK status code")
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("Target service returned status code %d", resp.StatusCode)})
+			return
+		}
+
+	}
+	// If targetURL is not set, still return 200 OK for successful appending
+	// If targetURL was set and the request failed, the handler would have already returned.
+	c.JSON(http.StatusOK, gin.H{"message": "Request processed"})
+}

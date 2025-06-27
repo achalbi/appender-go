@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Appender Sender</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  textarea { width: 80%; height: 100px; margin-bottom: 10px; }
+  button { padding: 10px 20px; cursor: pointer; }
+  #response { margin-top: 20px; padding: 10px; border: 1px solid #ccc; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<h1>Appender Sender</h1>
+
+<form id="appendForm">
+  <label for="inputText">Enter text to append:</label><br>
+  <textarea id="inputText" name="inputText"></textarea><br>
+  <button type="button" onclick="sendToAppender()">Send to Appender</button>
+</form>
+
+<h2>Response:</h2>
+<div id="response"></div>
+
+<script>
+async function sendToAppender() {
+  const inputText = document.getElementById('inputText').value;
+  const responseDiv = document.getElementById('response');
+  responseDiv.textContent = 'Sending...';
+
+  try {
+    const response = await fetch('/append', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ input: inputText })
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      responseDiv.textContent = 'Success:\n' + JSON.stringify(data, null, 2);
+      responseDiv.style.color = 'green';
+    } else {
+      responseDiv.textContent = 'Error:\n' + JSON.stringify(data, null, 2);
+      responseDiv.style.color = 'red';
+    }
+
+  } catch (error) {
+    responseDiv.textContent = 'Error sending request:\n' + error;
+    responseDiv.style.color = 'red';
+    console.error('Error sending request:', error);
+  }
+}
+</script>
+
+</body>
+</html>

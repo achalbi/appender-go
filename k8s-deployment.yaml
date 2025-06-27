@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appender-go
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: appender-go
+  template:
+    metadata:
+      labels:
+        app: appender-go
+    spec:
+      containers:
+        - name: appender-go
+          image: appender-go:latest # Replace with your image name and tag
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TARGET_URL
+              value: "http://your-target-service:8080/result" # Replace with your actual target URL
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
