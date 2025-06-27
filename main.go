@@ -104,7 +104,7 @@ func appendHandler(c *gin.Context) {
 		return
 	}
 
-	appendedString := fmt.Sprintf("%s I am GO instance %s", req.Input, podName)
+	appendedString := fmt.Sprintf("%s I am GO instance %s;", req.Input, podName)
 	logrus.WithField("result", appendedString).Info("Appended string")
 
 	if targetURL != "" {
